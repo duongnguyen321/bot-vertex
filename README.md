@@ -1,14 +1,12 @@
 # Bot Vertex
 
-NestJS Telegram bot for splitting group expenses from messy Vietnamese text.
+NestJS Telegram bot for splitting group expenses from Vietnamese `/list` messages, using three explicit commands only: `/set`, `/list`, `/bill`. The bot does not inspect ordinary chat messages.
 
 Flow:
 
-1. User mentions the bot in Telegram.
-2. LangChain + DeepSeek parse the text into JSON.
-3. Zod validates the parsed expense schema.
-4. Code calculates shares, ledger rows, net balances, and greedy settlement.
-5. The bot replies with event summary, balances, transfer steps, and a vertex-edge preview.
+1. `/set Dương, Don, Donkeij, Đức` — register a canonical name with aliases (first item is canonical, rest are aliases).
+2. `/list ...` — attach a message's bill lines to the chat's current bill session (stored, not parsed yet).
+3. `/bill` — parse all stored `/list` entries with DeepSeek, resolve aliases, infer missing payers from the `/list` sender, calculate settlement, and reply. If anything is ambiguous, the bot asks a clarifying question and keeps the session; nothing is cleared until `/bill` fully succeeds.
 
 ## Stack
 
@@ -43,12 +41,19 @@ PORT=3000
 bun run start:dev
 ```
 
-In a group, mention the bot or use `/share` / `/split`:
+In a group:
 
 ```text
-@mension_bot
-- Tiền phở: 200k - Dũng trả - Quân: 50, còn lại Dương, Dũng tự chia
-- Tiền 1000M: 177k - Quân trả - Dũng, Dương, Quân
+/set Dương, Don, Donkeij, Đức
+/set Dũng, a Dũng
+/set Quân, a Quân
+/set Nam, a Nam
+
+/list
+- Đặt sân đánh cầu: 200k, A Nam, a Dũng, a Quân
+- Đặt nước đánh cầu: 500k, a Nam, a Dũng, a Quân
+
+/bill
 ```
 
 ## Verify

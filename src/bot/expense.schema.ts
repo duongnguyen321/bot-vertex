@@ -99,3 +99,39 @@ export type SettlementResult = {
   vertices: MoneyVertex[];
   edges: MoneyEdge[];
 };
+
+// --- /set, /list, /bill session & identity types ---
+
+export type ChatId = number | string;
+export type UserId = number | string;
+
+export type PersonProfile = {
+  canonicalName: string;
+  aliases: string[];
+  linkedTelegramUserIds: UserId[];
+};
+
+export type PeopleDictionary = {
+  chatId: ChatId;
+  people: PersonProfile[];
+};
+
+export type BillListEntry = {
+  chatId: ChatId;
+  messageId: number;
+  senderId: UserId;
+  senderDisplayName: string;
+  senderCanonicalName?: string;
+  createdAt: string;
+  text: string;
+};
+
+export type BillSession = {
+  chatId: ChatId;
+  entries: BillListEntry[];
+};
+
+export type UnresolvedItem = {
+  sourceMessageId: number;
+  question: string;
+};

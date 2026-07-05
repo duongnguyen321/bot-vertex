@@ -1,0 +1,64 @@
+// bot-vertex Prisma schema — SQLite
+//
+// Design notes:
+// - SQLite, single file, no separate DB server to run — DATABASE_URL is a
+//   local file path (see .env.example). Good fit for a single-instance bot;
+//   if this ever needs multiple app instances writing concurrently, revisit
+//   (SQLite serializes writes at the file level).
+// - chatId and senderId are stored as String rather than Int. Telegram
+//   supergroup chat IDs (e.g. -1001234567890) and newer user IDs can be
+//   large enough that keeping them as plain strings sidesteps any integer
+//   range/precision questions entirely — these IDs are never used
+//   arithmetically, only for equality/lookup.
+// - messageId stays Int: it's a small, always-positive, per-chat counter.
+// - aliases / linkedTelegramUserIds are Json (not String[]): Prisma's
+//   native scalar-list type (String[]) is Postgres/CockroachDB-only and
+//   isn't available on SQLite. They're stored as a JSON array of strings
+//   and cast back to string[] in prisma-people.store.ts. One consequence:
+//   SQLite can't filter with something like `{ has: value }` the way
+//   Postgres arrays can, so resolveBySenderId() fetches per-chat rows and
+//   checks linkedTelegramUserIds in application code instead of in the
+//   query — fine at this scale (a handful of people per group chat).
+// - Alias-conflict detection (case-insensitive, Vietnamese-aware) still
+//   happens in application code, same as the in-memory PeopleStore — the
+//   @@unique([chatId, canonicalName]) below is a last-resort safety net,
+//   not the primary conflict check.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Person {
+  id                    String   @id @default(cuid())
+  chatId                String
+  canonicalName         String
+  aliases               Json // string[]
+  linkedTelegramUserIds Json // string[]
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@unique([chatId, canonicalName])
+  @@index([chatId])
+}
+
+model BillListEntry {
+  id                  String   @id @default(cuid())
+  chatId              String
+  messageId           Int
+  senderId            String
+  senderDisplayName   String
+  senderCanonicalName String?
+  text                String
+  createdAt           DateTime @default(now())
+
+  // Upserting on this unique key makes /list idempotent against Telegram's
+  // at-least-once update delivery — a redelivered update updates the same
+  // row instead of duplicating the bill line.
+  @@unique([chatId, messageId])
+  @@index([chatId])
+}

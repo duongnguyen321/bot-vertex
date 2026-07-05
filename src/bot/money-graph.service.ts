@@ -1,43 +1,30 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
-import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
 import { ChatOpenAI } from '@langchain/openai';
 import type { Runnable } from '@langchain/core/runnables';
 import type { Env } from '../env.validation';
+import type { BillListEntry, PeopleDictionary } from './expense.schema';
 import {
-  ExpenseInput,
-  LlmExpenseInputSchema,
-  ParsedExpenseInputSchema,
-  SettlementResult,
-} from './expense.schema';
-import { FormatterService } from './formatter.service';
-import { SettlementService } from './settlement.service';
+  BillParseResultSchema,
+  LlmBillParseResultSchema,
+  type BillParseResult,
+} from './bill-parser.schema';
 
-type MoneyState = {
-  text: string;
-  parsed?: ExpenseInput;
-  result?: SettlementResult;
-  response?: string;
-};
-
-const MoneyStateAnnotation = Annotation.Root({
-  text: Annotation<string>,
-  parsed: Annotation<ExpenseInput | undefined>,
-  result: Annotation<SettlementResult | undefined>,
-  response: Annotation<string | undefined>,
-});
-
+/**
+ * Batch-parses stored `/list` entries for a chat into structured bill
+ * events. The old one-shot free-text `run()`/`reply()`/`parse()` flow (and
+ * the LangGraph parse->calculate->format state graph) has been removed:
+ * the bot no longer inspects ordinary chat messages, and calculation +
+ * formatting now happen directly in BotUpdate.createBill() using
+ * SettlementService and FormatterService, so this service's only job is
+ * the LLM parse step.
+ */
 @Injectable()
 export class MoneyGraphService {
   private readonly parser: Runnable<unknown, unknown>;
-  private readonly graph: ReturnType<typeof this.buildGraph>;
 
-  constructor(
-    config: ConfigService<Env, true>,
-    private readonly formatter: FormatterService,
-    private readonly settlement: SettlementService,
-  ) {
+  constructor(config: ConfigService<Env, true>) {
     const model = new ChatOpenAI({
       apiKey: config.get('DEEPSEEK_API_KEY', { infer: true }),
       model: config.get('DEEPSEEK_MODEL', { infer: true }),
@@ -47,58 +34,55 @@ export class MoneyGraphService {
       },
     });
 
-    this.parser = model.withStructuredOutput(LlmExpenseInputSchema, {
-      name: 'ExpenseInput',
+    // Flat, union-free schema — required for jsonMode structured output.
+    // Post-validation/transform happens separately via BillParseResultSchema.
+    this.parser = model.withStructuredOutput(LlmBillParseResultSchema, {
+      name: 'BillParseResult',
       method: 'jsonMode',
     }) as Runnable<unknown, unknown>;
-    this.graph = this.buildGraph();
   }
 
-  async run(text: string): Promise<SettlementResult> {
-    const state = await this.graph.invoke({ text });
-    return state.result!;
-  }
-
-  async reply(text: string): Promise<string> {
-    const state = await this.graph.invoke({ text });
-    return state.response!;
-  }
-
-  private buildGraph() {
-    return new StateGraph(MoneyStateAnnotation)
-      .addNode('parse', async (state: MoneyState) => ({
-        parsed: await this.parse(state.text),
-      }))
-      .addNode('calculate', (state: MoneyState) => ({
-        result: this.settlement.calculate(state.parsed!),
-      }))
-      .addNode('format', (state: MoneyState) => ({
-        response: this.formatter.format(state.result!),
-      }))
-      .addEdge(START, 'parse')
-      .addEdge('parse', 'calculate')
-      .addEdge('calculate', 'format')
-      .addEdge('format', END)
-      .compile();
-  }
-
-  private async parse(text: string): Promise<ExpenseInput> {
-    const parsed = await this.parser.invoke([
-      new SystemMessage(
-        [
-          'You parse Vietnamese group expense messages into strict JSON.',
-          'Return VND only. Convert shorthand amounts: 200k=200000, 6tr815=6815000, 9tr600=9600000.',
-          'Each event needs title, amountVnd, paidBy, beneficiaries.',
-          'Top-level JSON should be an object: {"currency":"VND","events":[...]}.',
-          'Each beneficiary must use key "person"; do not use "name".',
-          'If a participant has a fixed amount, set amountVnd for that beneficiary.',
-          'If the remaining amount is split equally, omit amountVnd for those beneficiaries.',
-          'Do not calculate final settlements. Do not include markdown.',
-        ].join(' '),
-      ),
-      new HumanMessage(text),
+  async parseBillSession(input: {
+    entries: BillListEntry[];
+    people: PeopleDictionary;
+  }): Promise<BillParseResult> {
+    const raw = await this.parser.invoke([
+      new SystemMessage(this.buildSystemPrompt(input.people)),
+      new HumanMessage(this.buildSessionPayload(input.entries)),
     ]);
 
-    return ParsedExpenseInputSchema.parse(parsed);
+    return BillParseResultSchema.parse(raw);
+  }
+
+  private buildSystemPrompt(people: PeopleDictionary): string {
+    const knownNames = people.people
+      .map((person) => [person.canonicalName, ...person.aliases].join(' / '))
+      .join('; ');
+
+    return [
+      'You parse Vietnamese group-bill list messages into strict JSON.',
+      'Return VND only. Convert shorthand amounts: 200k=200000, 6tr815=6815000, 9tr600=9600000.',
+      'Each input message is tagged with [messageId=...] and can contain multiple bullet-point expense events; extract every event and copy the matching messageId into "sourceMessageId".',
+      'Each event needs sourceMessageId, title, amountVnd, and beneficiaries.',
+      'Do not set "paidBy"; in this app the payer is always inferred from the /list message sender metadata.',
+      'Each beneficiary must use key "person"; do not use "name".',
+      'If a participant has a fixed amount, set amountVnd for that beneficiary.',
+      'If the remaining amount is split equally, omit amountVnd for those beneficiaries.',
+      knownNames
+        ? `Known people in this chat (canonical / aliases): ${knownNames}.`
+        : 'No people have been registered with /set yet.',
+      'Do not try to match names to the known-people list yourself — copy beneficiary and payer names verbatim as written; the app resolves aliases, not you.',
+      'If a line is too ambiguous to extract an amount, title, or any beneficiary, add an entry to "unresolved" instead of guessing, with sourceMessageId, a short reason, and a Vietnamese question to ask the user.',
+      'Do not calculate final settlements. Do not include markdown.',
+    ].join(' ');
+  }
+
+  private buildSessionPayload(entries: BillListEntry[]): string {
+    return entries
+      .map(
+        (entry) =>
+          `[messageId=${entry.messageId}] [sender=${entry.senderCanonicalName ?? entry.senderDisplayName}]\n${entry.text}`,
+      )
+      .join('\n\n');
   }
 }

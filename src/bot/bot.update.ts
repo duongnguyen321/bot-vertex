@@ -1,75 +1,163 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { Ctx, On, Update } from 'nestjs-telegraf';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Command, Ctx, Update } from 'nestjs-telegraf';
 import type { Context } from 'telegraf';
 import type { Message } from 'telegraf/types';
 import { ZodError } from 'zod';
-import type { Env } from '../env.validation';
+import { extractCommandPayload, parseSetCommand } from './command.schema';
+import {
+  AliasConflictError,
+  PEOPLE_REPOSITORY,
+  type PeopleRepository,
+} from './people.store';
+import {
+  BILL_SESSION_REPOSITORY,
+  type BillSessionRepository,
+} from './bill-session.store';
 import { MoneyGraphService } from './money-graph.service';
+import { BillNormalizerService } from './bill-normalizer.service';
+import { SettlementService } from './settlement.service';
+import { FormatterService } from './formatter.service';
 
+// Note: the old `@On('text')` free-text/mention handler has been removed
+// entirely. Telegraf delivers command messages ("/set ...") to BOTH
+// `@On('text')` and `@Command()` handlers for the same update, since a
+// command is still a text message — leaving the old handler in place would
+// have double-processed every /set, /list, and /bill call, with the old
+// handler trying (and failing) to AI-parse the raw command text.
 @Update()
 @Injectable()
 export class BotUpdate {
   private readonly logger = new Logger(BotUpdate.name);
-  private readonly botUsername?: string;
 
   constructor(
-    config: ConfigService<Env, true>,
+    @Inject(PEOPLE_REPOSITORY) private readonly people: PeopleRepository,
+    @Inject(BILL_SESSION_REPOSITORY)
+    private readonly billSession: BillSessionRepository,
     private readonly moneyGraph: MoneyGraphService,
-  ) {
-    this.botUsername = config
-      .get('BOT_USERNAME', { infer: true })
-      ?.replace(/^@/, '');
+    private readonly normalizer: BillNormalizerService,
+    private readonly settlement: SettlementService,
+    private readonly formatter: FormatterService,
+  ) {}
+
+  @Command('set')
+  async setName(@Ctx() ctx: Context) {
+    const message = ctx.message as Message.TextMessage | undefined;
+    if (!message?.text || !ctx.chat) return;
+
+    const chatId = ctx.chat.id;
+    const payload = extractCommandPayload(message.text);
+
+    try {
+      const command = parseSetCommand(payload);
+      await this.people.setPerson(
+        chatId,
+        command.canonicalName,
+        command.aliases,
+        message.from?.id,
+      );
+      await ctx.reply(
+        `Đã lưu ${command.canonicalName}` +
+          (command.aliases.length
+            ? ` (alias: ${command.aliases.join(', ')}).`
+            : '.'),
+      );
+    } catch (error) {
+      await ctx.reply(this.describeError(error, 'set'));
+    }
   }
 
-  @On('text')
-  async onText(@Ctx() ctx: Context) {
+  @Command('list')
+  async addList(@Ctx() ctx: Context) {
     const message = ctx.message as Message.TextMessage | undefined;
-    if (!message?.text || !this.shouldHandle(ctx, message.text)) return;
+    if (!message?.text || !ctx.chat) return;
 
-    const text = this.cleanMention(message.text);
+    const chatId = ctx.chat.id;
+    const payload = extractCommandPayload(message.text);
+
+    if (!payload) {
+      await ctx.reply('Gửi kèm nội dung bill sau /list nhé.');
+      return;
+    }
+
+    const senderId = message.from?.id ?? 0;
+    const senderDisplayName =
+      message.from?.username ?? message.from?.first_name ?? 'Unknown';
+    const senderCanonicalName = await this.people.resolveBySenderId(
+      chatId,
+      senderId,
+    );
+
+    await this.billSession.append(chatId, {
+      chatId,
+      messageId: message.message_id,
+      senderId,
+      senderDisplayName,
+      senderCanonicalName,
+      createdAt: new Date().toISOString(),
+      text: payload,
+    });
+
+    const lineCount = payload
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean).length;
+
+    await ctx.reply(`Đã thêm ${lineCount} dòng vào bill hiện tại.`);
+  }
+
+  @Command('bill')
+  async createBill(@Ctx() ctx: Context) {
+    if (!ctx.chat) return;
+    const chatId = ctx.chat.id;
+    const entries = await this.billSession.getEntries(chatId);
+
+    if (entries.length === 0) {
+      await ctx.reply('Chưa có dòng bill nào. Gửi /list trước nhé.');
+      return;
+    }
+
+    const people = await this.people.getDictionary(chatId);
+
     try {
-      await ctx.reply(await this.moneyGraph.reply(text));
+      const parsed = await this.moneyGraph.parseBillSession({
+        entries,
+        people,
+      });
+      const normalized = await this.normalizer.normalize(
+        parsed,
+        entries,
+        chatId,
+        this.people,
+      );
+
+      if (!normalized.expenseInput) {
+        await ctx.reply(this.formatter.formatUnresolved(normalized.unresolved));
+        return; // session kept intentionally
+      }
+
+      // settlement.calculate() throws a plain Error on mismatched
+      // fixed-share totals (see settlement.service.ts resolveShares) —
+      // must not crash the update handler or leak a stack trace to Telegram.
+      const result = this.settlement.calculate(normalized.expenseInput);
+      await ctx.reply(this.formatter.format(result));
+      await this.billSession.clear(chatId); // cleared ONLY on full success
     } catch (error) {
       this.logger.error(error);
       await ctx.reply(
-        [
-          'Mình chưa parse chắc được đoạn này.',
-          this.errorHint(error),
-          'Bạn gửi theo dạng: Tên khoản: 200k - Dũng trả - Dũng, Quân, Dương.',
-          'Nếu có người trả fixed: Quân: 50, còn lại Dương, Dũng tự chia.',
-        ]
-          .filter(Boolean)
-          .join('\n'),
+        'Mình chưa chốt được bill này (lỗi parse hoặc số tiền không khớp). Bill hiện tại vẫn được giữ lại.',
       );
+      // do NOT clear session — let the user retry /bill after fixing /set or /list
     }
   }
 
-  private shouldHandle(ctx: Context, text: string) {
-    if (ctx.chat?.type === 'private') return true;
-    if (text.startsWith('/share') || text.startsWith('/split')) return true;
-    return this.botUsername
-      ? text.includes(`@${this.botUsername}`)
-      : text.includes('@');
-  }
+  private describeError(error: unknown, command: string): string {
+    if (error instanceof AliasConflictError) return error.message;
 
-  private cleanMention(text: string) {
-    return this.botUsername
-      ? text.replace(new RegExp(`@${this.botUsername}\\b`, 'gi'), '').trim()
-      : text.trim();
-  }
-
-  private errorHint(error: unknown) {
     if (error instanceof ZodError) {
-      return `Lỗi validate: ${error.issues
-        .map((issue) => `${issue.path.join('.') || 'root'} ${issue.message}`)
-        .join('; ')}`;
+      return `Cú pháp /${command} chưa đúng. Ví dụ: /set Dương, Don, Donkeij, Đức`;
     }
 
-    if (error instanceof Error && 'llmOutput' in error) {
-      return 'Lỗi AI output: JSON chưa đúng schema chi phí.';
-    }
-
-    return '';
+    this.logger.error(error);
+    return 'Có lỗi không xác định, thử lại nhé.';
   }
 }
