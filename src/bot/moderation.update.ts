@@ -3,7 +3,7 @@ import { Command, Ctx, On, Update } from 'nestjs-telegraf';
 import type { Context } from 'telegraf';
 import type { Message } from 'telegraf/types';
 import { extractCommandPayload, parseCommaList } from './command.schema';
-import { matchesTrigger } from './trigger-word.matcher';
+import { matchesTrigger, maskTriggerWords } from './trigger-word.matcher';
 import {
   TRIGGER_WORD_REPOSITORY,
   type TriggerWordRepository,
@@ -98,7 +98,7 @@ export class ModerationUpdate {
     }
 
     await ctx.reply(
-      `User ${username} có dấu hiệu bàn lùi, đã ngăn chặn trừ trong trứng\n> Câu vi phạm: ${message.text}`,
+      `User ${username} có dấu hiệu bàn lùi, đã ngăn chặn trừ trong trứng\n> Câu vi phạm: ${maskTriggerWords(message.text, words)}`,
     );
   }
 

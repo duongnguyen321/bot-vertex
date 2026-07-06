@@ -40,3 +40,14 @@ export function parseSetCommand(payload: string): SetCommand {
 export function extractCommandPayload(text: string): string {
   return text.replace(/^\/\w+(@\w+)?\s*/, '').trim();
 }
+
+/**
+ * Checks whether a message's leading token is a specific command, e.g.
+ * matchesCommand('/list@MyBot foo', 'list') -> true. Used to filter
+ * edited_message updates (which have no @Command() routing of their own)
+ * down to just the command we care about re-processing.
+ */
+export function matchesCommand(text: string, command: string): boolean {
+  const pattern = new RegExp(`^/${command}(@\\w+)?(\\s|$)`, 'i');
+  return pattern.test(text);
+}

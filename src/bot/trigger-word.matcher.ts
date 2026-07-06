@@ -37,3 +37,25 @@ export function matchesTrigger(text: string, words: string[]): boolean {
   const regex = buildTriggerRegex(words);
   return regex ? regex.test(text) : false;
 }
+
+/**
+ * Replaces every occurrence of a trigger word/phrase in the text with
+ * '****', so the violation warning doesn't reprint the banned word itself.
+ * Same boundary logic as buildTriggerRegex, but with the 'g' flag added so
+ * all matches are replaced, not just the first.
+ */
+export function maskTriggerWords(text: string, words: string[]): string {
+  const escaped = words
+    .map((word) => word.trim())
+    .filter(Boolean)
+    .map(escapeRegExp);
+
+  if (escaped.length === 0) return text;
+
+  const pattern = escaped.join('|');
+  const regex = new RegExp(
+    `(?<![\\p{L}\\p{N}])(?:${pattern})(?![\\p{L}\\p{N}])`,
+    'giu',
+  );
+  return text.replace(regex, '****');
+}

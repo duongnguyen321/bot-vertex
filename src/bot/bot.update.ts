@@ -1,9 +1,13 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { Command, Ctx, Update } from 'nestjs-telegraf';
+import { Command, Ctx, On, Update } from 'nestjs-telegraf';
 import type { Context } from 'telegraf';
 import type { Message } from 'telegraf/types';
 import { ZodError } from 'zod';
-import { extractCommandPayload, parseSetCommand } from './command.schema';
+import {
+  extractCommandPayload,
+  matchesCommand,
+  parseSetCommand,
+} from './command.schema';
 import {
   AliasConflictError,
   PEOPLE_REPOSITORY,
@@ -79,30 +83,28 @@ export class BotUpdate {
       return;
     }
 
-    const senderId = message.from?.id ?? 0;
-    const senderDisplayName =
-      message.from?.username ?? message.from?.first_name ?? 'Unknown';
-    const senderCanonicalName = await this.people.resolveBySenderId(
-      chatId,
-      senderId,
-    );
+    await this.storeListEntry(chatId, message, payload);
+    await ctx.react('👍');
+  }
 
-    await this.billSession.append(chatId, {
-      chatId,
-      messageId: message.message_id,
-      senderId,
-      senderDisplayName,
-      senderCanonicalName,
-      createdAt: new Date().toISOString(),
-      text: payload,
-    });
+  // Telegram's native "edit message" feature doubles as list editing: if
+  // someone edits a /list message they already sent, this re-upserts the
+  // same (chatId, messageId) row instead of creating a duplicate entry —
+  // see BillSessionStore.append / PrismaBillSessionStore.append. This is
+  // the fix for "list has a mismatch and I can't edit it" — just edit the
+  // original Telegram message and the stored bill line updates with it.
+  @On('edited_message')
+  async editList(@Ctx() ctx: Context) {
+    const message = ctx.editedMessage as Message.TextMessage | undefined;
+    if (!message?.text || !ctx.chat) return;
+    if (!matchesCommand(message.text, 'list')) return;
 
-    const lineCount = payload
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean).length;
+    const chatId = ctx.chat.id;
+    const payload = extractCommandPayload(message.text);
+    if (!payload) return; // don't silently wipe an entry down to nothing
 
-    await ctx.reply(`Đã thêm ${lineCount} dòng vào bill hiện tại.`);
+    await this.storeListEntry(chatId, message, payload);
+    await ctx.react('👍');
   }
 
   @Command('bill')
@@ -148,6 +150,30 @@ export class BotUpdate {
       );
       // do NOT clear session — let the user retry /bill after fixing /set or /list
     }
+  }
+
+  private async storeListEntry(
+    chatId: number,
+    message: Message.TextMessage,
+    payload: string,
+  ): Promise<void> {
+    const senderId = message.from?.id ?? 0;
+    const senderDisplayName =
+      message.from?.username ?? message.from?.first_name ?? 'Unknown';
+    const senderCanonicalName = await this.people.resolveBySenderId(
+      chatId,
+      senderId,
+    );
+
+    await this.billSession.append(chatId, {
+      chatId,
+      messageId: message.message_id,
+      senderId,
+      senderDisplayName,
+      senderCanonicalName,
+      createdAt: new Date().toISOString(),
+      text: payload,
+    });
   }
 
   private describeError(error: unknown, command: string): string {

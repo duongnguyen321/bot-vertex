@@ -21,10 +21,23 @@ export const BillListEntrySchema = z.object({
 // which LangChain's StructuredOutputParser rejects outright with a plain
 // z.number(). Coercing at the schema boundary is more robust than hoping
 // the model's typing is consistent across calls.
+//
+// DeepSeek also sometimes sends explicit `"amountVnd": null` for a
+// beneficiary meant to split the remainder equally, rather than omitting
+// the key entirely. Left as plain z.coerce.number(), that would coerce
+// null -> 0 (Number(null) === 0) and pass .nonnegative() silently — turning
+// "split equally" into "owes exactly 0", which is wrong settlement math,
+// not a crash, so worse than failing loudly. Preprocessing null ->
+// undefined first restores the intended "no fixed amount" meaning.
+const NullableAmountSchema = z.preprocess(
+  (value) => (value === null ? undefined : value),
+  z.coerce.number().nonnegative().optional(),
+);
+
 export const LlmBillBeneficiarySchema = z.object({
   person: z.string().trim().min(1).optional(),
   name: z.string().trim().min(1).optional(),
-  amountVnd: z.coerce.number().nonnegative().optional(),
+  amountVnd: NullableAmountSchema,
 });
 
 export const LlmBillEventSchema = z.object({
@@ -58,7 +71,7 @@ export const LlmBillParseResultSchema = z.object({
 // `{ name, amountVnd }` never satisfies when amountVnd is `.optional()`.
 export const BillBeneficiaryNameSchema = z.object({
   name: z.string().trim().min(1),
-  amountVnd: z.coerce.number().nonnegative().optional(),
+  amountVnd: NullableAmountSchema,
 });
 
 export const BillBeneficiarySchema = LlmBillBeneficiarySchema.transform(

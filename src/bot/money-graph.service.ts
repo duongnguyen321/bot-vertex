@@ -46,12 +46,50 @@ export class MoneyGraphService {
     entries: BillListEntry[];
     people: PeopleDictionary;
   }): Promise<BillParseResult> {
-    const raw = await this.parser.invoke([
-      new SystemMessage(this.buildSystemPrompt(input.people)),
-      new HumanMessage(this.buildSessionPayload(input.entries)),
-    ]);
+    try {
+      const raw = await this.parser.invoke([
+        new SystemMessage(this.buildSystemPrompt(input.people)),
+        new HumanMessage(this.buildSessionPayload(input.entries)),
+      ]);
 
-    return BillParseResultSchema.parse(raw);
+      return BillParseResultSchema.parse(raw);
+    } catch (error) {
+      const recovered = this.recoverFromMalformedOutput(error);
+      if (recovered) return recovered;
+      throw error;
+    }
+  }
+
+  /**
+   * LangChain's structured-output parser throws an OutputParserException
+   * (with the raw model text attached as `llmOutput`) when the model's JSON
+   * doesn't match the requested shape exactly. In practice, with a long
+   * /list session (many events), DeepSeek sometimes responds with a bare
+   * JSON array of events instead of the required `{ events, unresolved }`
+   * object — technically valid JSON, just the wrong top-level shape, and
+   * jsonMode gives no hard schema enforcement to prevent it.
+   *
+   * Rather than failing the whole /bill call over a shape mismatch the
+   * model clearly didn't intend, this salvages the raw text: parse it as
+   * JSON, and if it's a bare array, treat it as the "events" array.
+   */
+  private recoverFromMalformedOutput(error: unknown): BillParseResult | undefined {
+    const llmOutput = (error as { llmOutput?: unknown })?.llmOutput;
+    if (typeof llmOutput !== 'string') return undefined;
+
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(llmOutput);
+    } catch {
+      return undefined;
+    }
+
+    const candidate = Array.isArray(parsedJson)
+      ? { events: parsedJson, unresolved: [] }
+      : parsedJson;
+
+    const result = BillParseResultSchema.safeParse(candidate);
+    return result.success ? result.data : undefined;
   }
 
   private buildSystemPrompt(people: PeopleDictionary): string {
@@ -68,6 +106,7 @@ export class MoneyGraphService {
       'Return VND only. Convert shorthand amounts: 200k=200000, 6tr815=6815000, 9tr600=9600000.',
       'Each input message is tagged with [messageId=...] and can contain multiple bullet-point expense events; extract every event and copy the matching messageId into "sourceMessageId".',
       'Each event needs sourceMessageId, title, amountVnd, and beneficiaries.',
+      'Respond with a single JSON object containing exactly two top-level keys, "events" and "unresolved" — never a bare array, even if there is only one event or many events.',
       'Set "paidBy" only when the line explicitly names a payer different from the message sender; otherwise omit paidBy entirely so the app can infer it from the sender.',
       'Each beneficiary must use key "person"; do not use "name".',
       'If a participant has a fixed amount, set amountVnd for that beneficiary.',

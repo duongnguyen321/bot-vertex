@@ -20,7 +20,17 @@ export class BillSessionStore implements BillSessionRepository {
 
   async append(chatId: ChatId, entry: BillListEntry): Promise<void> {
     const session = this.getOrCreate(chatId);
-    session.entries.push(entry);
+    // Mirrors PrismaBillSessionStore's upsert-by-(chatId, messageId): if the
+    // user edits their original /list message, we get called again with the
+    // same messageId and should replace the entry, not duplicate it.
+    const index = session.entries.findIndex(
+      (existing) => existing.messageId === entry.messageId,
+    );
+    if (index === -1) {
+      session.entries.push(entry);
+    } else {
+      session.entries[index] = entry;
+    }
   }
 
   async getEntries(chatId: ChatId): Promise<BillListEntry[]> {

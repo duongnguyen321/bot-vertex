@@ -1,4 +1,4 @@
-import { buildTriggerRegex, matchesTrigger } from './trigger-word.matcher';
+import { buildTriggerRegex, matchesTrigger, maskTriggerWords } from './trigger-word.matcher';
 
 describe('trigger-word.matcher', () => {
   const words = ['Ốm', 'hủy', 'thôi', 'bão', 'mưa', 'về sớm'];
@@ -33,5 +33,31 @@ describe('trigger-word.matcher', () => {
   it('escapes regex-special characters in a trigger word', () => {
     expect(matchesTrigger('giá 100$ nhé', ['100$'])).toBe(true);
     expect(() => matchesTrigger('an toàn', ['a.b('])).not.toThrow();
+  });
+});
+
+describe('maskTriggerWords', () => {
+  const words = ['Ổm', 'hủy', 'thôi', 'bão', 'mưa', 'về sớm'];
+
+  it('replaces every matched trigger word with ****', () => {
+    expect(maskTriggerWords('Chắc t phải hủy rồi', words)).toBe(
+      'Chắc t phải **** rồi',
+    );
+  });
+
+  it('replaces multiple occurrences in the same message', () => {
+    expect(maskTriggerWords('hủy thôi, hủy luôn', words)).toBe(
+      '**** ****, **** luôn',
+    );
+  });
+
+  it('leaves unrelated text untouched', () => {
+    expect(maskTriggerWords('Hẹn 7h tối nay nhé', words)).toBe(
+      'Hẹn 7h tối nay nhé',
+    );
+  });
+
+  it('returns the original text unchanged for an empty word list', () => {
+    expect(maskTriggerWords('Ổm quá', [])).toBe('Ổm quá');
   });
 });
