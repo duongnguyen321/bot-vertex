@@ -17,6 +17,11 @@ const BOT_COMMANDS = [
   { command: 'set', description: 'Đăng ký tên và alias: /set Dương, Don' },
   { command: 'list', description: 'Thêm dòng bill vào phiên hiện tại' },
   { command: 'bill', description: 'Chốt bill từ các dòng đã /list' },
+  {
+    command: 'add',
+    description: 'Thêm từ khoá cảnh báo bàn lùi: /add Ốm, hủy',
+  },
+  { command: 'remove', description: 'Xoá từ khoá cảnh báo bàn lùi' },
 ];
 
 @Injectable()
@@ -32,6 +37,8 @@ export class BotCommandsService implements OnModuleInit {
     await this.bot.telegram.setMyCommands(BOT_COMMANDS, {
       scope: { type: 'all_group_chats' },
     });
-    this.logger.log('Registered /set, /list, /bill with Telegram');
+    this.logger.log(
+      'Registered /set, /list, /bill, /add, /remove with Telegram',
+    );
   }
 }

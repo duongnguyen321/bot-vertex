@@ -56,7 +56,11 @@ export class MoneyGraphService {
 
   private buildSystemPrompt(people: PeopleDictionary): string {
     const knownNames = people.people
-      .map((person) => [person.canonicalName, ...person.aliases].join(' / '))
+      .map((person) =>
+        person.aliases.length
+          ? `${person.canonicalName} (also called: ${person.aliases.join(', ')})`
+          : person.canonicalName,
+      )
       .join('; ');
 
     return [
@@ -64,15 +68,18 @@ export class MoneyGraphService {
       'Return VND only. Convert shorthand amounts: 200k=200000, 6tr815=6815000, 9tr600=9600000.',
       'Each input message is tagged with [messageId=...] and can contain multiple bullet-point expense events; extract every event and copy the matching messageId into "sourceMessageId".',
       'Each event needs sourceMessageId, title, amountVnd, and beneficiaries.',
-      'Do not set "paidBy"; in this app the payer is always inferred from the /list message sender metadata.',
+      'Set "paidBy" only when the line explicitly names a payer different from the message sender; otherwise omit paidBy entirely so the app can infer it from the sender.',
       'Each beneficiary must use key "person"; do not use "name".',
       'If a participant has a fixed amount, set amountVnd for that beneficiary.',
       'If the remaining amount is split equally, omit amountVnd for those beneficiaries.',
       knownNames
-        ? `Known people in this chat (canonical / aliases): ${knownNames}.`
-        : 'No people have been registered with /set yet.',
-      'Do not try to match names to the known-people list yourself — copy beneficiary and payer names verbatim as written; the app resolves aliases, not you.',
-      'If a line is too ambiguous to extract an amount, title, or any beneficiary, add an entry to "unresolved" instead of guessing, with sourceMessageId, a short reason, and a Vietnamese question to ask the user.',
+        ? `Known people already registered in this chat via /set (canonical name, with any aliases in parentheses): ${knownNames}.`
+        : 'No people have been registered with /set yet, so beneficiary names cannot be resolved to anyone — copy them verbatim as written.',
+      knownNames
+        ? 'Use that list as context: when a beneficiary name in the text clearly refers to one of those people — including when written with a Vietnamese kinship/honorific prefix (anh, a, chị, c, em, e, bạn, chú, cô, bác, dì, ông, bà, cậu, mợ), a nickname, a minor misspelling, or different casing/diacritics — output that person\'s exact canonical name from the list above (not the raw text, not an alias) in "person". Only copy the raw text verbatim when it does NOT clearly match anyone in the known-people list.'
+        : 'Copy each beneficiary name exactly as written in the text.',
+      'If a beneficiary genuinely cannot be matched to anyone (not in the known-people list and not resolvable from context) and the text is ambiguous about who it is, add an entry to "unresolved" instead of guessing, with sourceMessageId, a short reason, and a Vietnamese question to ask the user.',
+      'If a line is too ambiguous to extract an amount or title at all, also add it to "unresolved".',
       'Do not calculate final settlements. Do not include markdown.',
     ].join(' ');
   }

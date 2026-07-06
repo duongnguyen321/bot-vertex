@@ -62,3 +62,16 @@ model BillListEntry {
   @@unique([chatId, messageId])
   @@index([chatId])
 }
+
+// One row per (chatId, word) rather than a single Json array column, so
+// /add and /remove are simple idempotent single-row create/delete
+// operations instead of read-modify-write races on a shared array.
+model TriggerWord {
+  id        String   @id @default(cuid())
+  chatId    String
+  word      String
+  createdAt DateTime @default(now())
+
+  @@unique([chatId, word])
+  @@index([chatId])
+}

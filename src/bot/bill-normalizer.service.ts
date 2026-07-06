@@ -50,7 +50,9 @@ export class BillNormalizerService {
         beneficiaries.push({ person, amountVnd: beneficiary.amountVnd });
       }
 
-      const paidBy = sourceEntry?.senderCanonicalName;
+      const paidBy = event.paidBy
+        ? await people.resolveName(chatId, event.paidBy)
+        : sourceEntry?.senderCanonicalName;
 
       if (!paidBy) {
         unresolved.push({

@@ -121,14 +121,7 @@ export class PrismaPeopleStore implements PeopleRepository {
     const people = await this.prisma.person.findMany({
       where: { chatId: String(chatId) },
     });
-    const key = normalizeKey(rawName);
-    return people.find(
-      (person) =>
-        normalizeKey(person.canonicalName) === key ||
-        toStringArray(person.aliases).some(
-          (alias) => normalizeKey(alias) === key,
-        ),
-    )?.canonicalName;
+    return this.findOwner(people, rawName)?.canonicalName;
   }
 
   async resolveBySenderId(
@@ -159,5 +152,19 @@ export class PrismaPeopleStore implements PeopleRepository {
         linkedTelegramUserIds: toStringArray(person.linkedTelegramUserIds),
       })),
     };
+  }
+
+  private findOwner(
+    people: { canonicalName: string; aliases: unknown }[],
+    name: string,
+  ): { canonicalName: string } | undefined {
+    const key = normalizeKey(name);
+    return people.find(
+      (person) =>
+        normalizeKey(person.canonicalName) === key ||
+        toStringArray(person.aliases).some(
+          (alias) => normalizeKey(alias) === key,
+        ),
+    );
   }
 }
